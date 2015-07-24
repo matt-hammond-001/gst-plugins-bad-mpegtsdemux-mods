@@ -26,7 +26,7 @@
 #include <stdlib.h>
 
 /* Skew calculation pameters */
-#define MAX_TIME	(2 * GST_SECOND)
+#define MAX_TIME  (2 * GST_SECOND)
 
 /* maximal PCR time */
 #define PCR_MAX_VALUE (((((guint64)1)<<33) * 300) + 298)
@@ -55,6 +55,12 @@ static GstClockTime calculate_skew (MpegTSPCR * pcr, guint64 pcrtime,
 static void _close_current_group (MpegTSPCR * pcrtable);
 static void record_pcr (MpegTSPacketizer2 * packetizer, MpegTSPCR * pcrtable,
     guint64 pcr, guint64 offset);
+
+GstClockTime
+mpegts_packetizer_pts_ts_skew_offset (MpegTSPacketizer2 * packetizer,
+    guint16 pcr_pid);
+GstClockTime
+mpegts_packetizer_first_pcr_ts (MpegTSPacketizer2 * packetizer, guint16 pcr_pid);
 
 #define CONTINUITY_UNSET 255
 #define VERSION_NUMBER_UNSET 255
@@ -390,6 +396,16 @@ mpegts_packetizer_parse_adaptation_field_control (MpegTSPacketizer2 *
       if (!pcrtable)
         pcrtable = get_pcr_table (packetizer, packet->pid);
       record_pcr (packetizer, pcrtable, packet->pcr, packet->offset);
+
+//   NE report newly updated/captured pcr and pid here
+//   These are the incoming live packets, the first_pcr and offset are not affected (see record_pcr)
+
+//     g_print ("****Packetiser: Recording pcr for later retrieval \n");
+//     g_print ("pid 0x%04x pcr %" G_GUINT64_FORMAT " (%" GST_TIME_FORMAT
+//        ") offset:%" G_GUINT64_FORMAT "\n", packet->pid, packet->pcr,
+//        GST_TIME_ARGS (PCRTIME_TO_GSTTIME (packet->pcr)), packet->offset);
+
+//   End of insert 
     }
     PACKETIZER_GROUP_UNLOCK (packetizer);
   }
@@ -1582,8 +1598,8 @@ _reevaluate_group_pcr_offset (MpegTSPCR * pcrtable, PCROffsetGroup * group)
         GST_DEBUG ("Previous group bitrate (%" G_GUINT64_FORMAT " / %"
             GST_TIME_FORMAT ") : %" G_GUINT64_FORMAT,
             current->pending[current->last].offset,
-            GST_TIME_ARGS (PCRTIME_TO_GSTTIME (current->pending[current->
-                        last].pcr)), prevbr);
+            GST_TIME_ARGS (PCRTIME_TO_GSTTIME (current->pending[current->last].
+                    pcr)), prevbr);
       } else if (prev->values[prev->last_value].offset) {
         prevoffset = prev->values[prev->last_value].offset + prev->first_offset;
         prevpcr = prev->values[prev->last_value].pcr + prev->first_pcr;
@@ -1595,8 +1611,8 @@ _reevaluate_group_pcr_offset (MpegTSPCR * pcrtable, PCROffsetGroup * group)
         GST_DEBUG ("Previous group bitrate (%" G_GUINT64_FORMAT " / %"
             GST_TIME_FORMAT ") : %" G_GUINT64_FORMAT,
             prev->values[prev->last_value].offset,
-            GST_TIME_ARGS (PCRTIME_TO_GSTTIME (prev->values[prev->
-                        last_value].pcr)), prevbr);
+            GST_TIME_ARGS (PCRTIME_TO_GSTTIME (prev->values[prev->last_value].
+                    pcr)), prevbr);
       } else {
         GST_DEBUG ("Using overall bitrate");
         prevoffset = prev->values[prev->last_value].offset + prev->first_offset;
@@ -1904,9 +1920,8 @@ record_pcr (MpegTSPacketizer2 * packetizer, MpegTSPCR * pcrtable,
           group->first_offset,
           GST_TIME_ARGS (PCRTIME_TO_GSTTIME (group->pcr_offset)));
       GST_DEBUG ("Last PCR: +%" GST_TIME_FORMAT " offset: +%" G_GUINT64_FORMAT,
-          GST_TIME_ARGS (PCRTIME_TO_GSTTIME (group->values[group->
-                      last_value].pcr)),
-          group->values[group->last_value].offset);
+          GST_TIME_ARGS (PCRTIME_TO_GSTTIME (group->values[group->last_value].
+                  pcr)), group->values[group->last_value].offset);
       /* Check if before group */
       if (offset < group->first_offset) {
         GST_DEBUG ("offset is before that group");
@@ -1929,7 +1944,19 @@ record_pcr (MpegTSPacketizer2 * packetizer, MpegTSPCR * pcrtable,
       /* Else after group */
       prev = group;
     }
+    //NE: if think this is the one call with continuous set to false, prev=NULL, so should
+    //correspond to intitialisation and good point to output values
     _set_current_group (pcrtable, prev, pcr, offset, FALSE);
+
+    //NE Added read out here
+    g_print ("****Packetiser record_pcr: ****** \n");
+    g_print ("pid 0x%04x \n", pcrtable->pid);
+    g_print ("First PCR:%" G_GUINT64_FORMAT " (%" GST_TIME_FORMAT ") offset:%"
+        G_GUINT64_FORMAT "\n", current->first_pcr,
+        GST_TIME_ARGS (PCRTIME_TO_GSTTIME (current->first_pcr)),
+        current->first_offset);
+    //NE End of readout
+
     return;
   }
 
@@ -1997,6 +2024,16 @@ record_pcr (MpegTSPacketizer2 * packetizer, MpegTSPCR * pcrtable,
   GST_DEBUG ("Last PCR: +%" GST_TIME_FORMAT " offset: +%" G_GUINT64_FORMAT,
       GST_TIME_ARGS (PCRTIME_TO_GSTTIME (current->pending[current->last].pcr)),
       current->pending[current->last].offset);
+
+// NE lets write out that we have updated the window
+// The values reported here are static ie, do not change with group over time, but are reported many time (with each group)
+
+//  g_print ("****Packetiser record_pcr: ****** \n");
+//  g_print ("pid 0x%04x \n", pcrtable->pid);
+//  g_print ("First PCR:%" G_GUINT64_FORMAT " (%" GST_TIME_FORMAT ") offset:%" G_GUINT64_FORMAT "\n",
+//       current->first_pcr, GST_TIME_ARGS (PCRTIME_TO_GSTTIME (current->first_pcr)),
+//      current->first_offset);
+//end of insert
 
   /* If we haven't stored enough values, bail out */
   if (current->write != current->first) {
@@ -2467,3 +2504,103 @@ mpegts_packetizer_set_current_pcr_offset (MpegTSPacketizer2 * packetizer,
   }
   PACKETIZER_GROUP_UNLOCK (packetizer);
 }
+
+/*Added Functions to expose the offset*/
+/*NE Adding function to return first PCR_ts by adapting from function above*/
+
+GstClockTime
+mpegts_packetizer_first_pcr_ts (MpegTSPacketizer2 * packetizer, guint16 pcr_pid)
+{
+
+  MpegTSPCR *pcrtable;
+  PCROffsetGroup *group;
+  //PCROffsetCurrent *current;
+
+  GstClockTime res = GST_CLOCK_TIME_NONE;
+
+  PACKETIZER_GROUP_LOCK (packetizer);
+
+  //pcrtable = get_pcr_table (packetizer, pcr_pid);  
+  /* the routine get_pcr_table is state-full and our calls are opportunistic, so avoided */
+  //pcrtable = get_pcr_table (packetizer, pcr_pid); 
+
+  pcrtable = packetizer->observations[packetizer->pcrtablelut[pcr_pid]]; 
+
+  if (pcrtable == NULL || pcrtable->current->group == NULL) {
+    PACKETIZER_GROUP_UNLOCK (packetizer);
+    return res;
+  }
+
+  /* NE - Try to catch the offset updates after a search*/
+  //if (pcrtable->current){
+  // if (pcrtable->current->first_pcr) {
+  // current = pcrtable->current;
+  // res = PCRTIME_TO_GSTTIME (current->first_pcr);
+  // return res;
+  // }
+  //}
+ 
+  //if (pcrtable->groups)
+  //  group = pcrtable->groups->data;  //NE - I think this always looks at the first group
+  //else
+    group = pcrtable->current->group;
+
+  //notes from packetizer.h
+  /* First raw PCR of this group. Units: 1/27MHz.
+   * All values[].pcr are differences against first_pcr */
+  //guint64 first_pcr;
+  /* Offset of this group in bytes.
+   * All values[].offset are differences against first_offset */
+  //guint64 first_offset;
+
+  if (group->first_pcr != -1) {
+    res = PCRTIME_TO_GSTTIME (group->first_pcr);
+  } else
+    GST_WARNING
+        ("Not enough information to return first pcr timestamp in mpegpacketizer");
+
+  PACKETIZER_GROUP_UNLOCK (packetizer);
+  return res;
+}
+
+/* end of added function */
+
+/*NE Adding function to return first PTS_ts skew offset by adapting from function above the one above*/
+
+GstClockTime
+mpegts_packetizer_pts_ts_skew_offset (MpegTSPacketizer2 * packetizer,
+    guint16 pcr_pid)
+{
+
+  // This routine is not tested NE 20062014
+  GstClockTime res = GST_CLOCK_TIME_NONE;
+  return res;
+}
+
+  /* the routine get_pcr_table is state-full and our calls are opportunistic, so avoided 
+     //MpegTSPCR *pcrtable = get_pcr_table (packetizer, pcr_pid);
+
+     MpegTSPacketizerPrivate *priv = packetizer->priv;
+     MpegTSPCR *pcrtable;
+
+     pcrtable = priv->observations[priv->pcrtablelut[pcr_pid]];
+     if (pcrtable==NULL) return res;
+
+     if ((pcrtable->first_pcr != -1) &&(packetizer->calculate_skew
+     && GST_CLOCK_TIME_IS_VALID (pcrtable->base_time)))
+     {
+     g_print ("****PTS offset being used %" G_GUINT64_FORMAT " base_pcrtime:%" G_GUINT64_FORMAT
+     " base_time:%" GST_TIME_FORMAT " skew:%" G_GUINT64_FORMAT "\n", pcrtable->pcroffset, 
+     pcrtable->base_pcrtime,
+     GST_TIME_ARGS (pcrtable->base_time), pcrtable->skew);
+
+     res = pcrtable->pcroffset - pcrtable->base_pcrtime +
+     pcrtable->base_time + pcrtable->skew;
+     } else
+     GST_WARNING ("Not enough information to return first pcr timestamp in mpegpacketizer");
+
+     return res;
+     }
+   */
+
+/* end of added function */

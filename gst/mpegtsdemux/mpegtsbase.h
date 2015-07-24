@@ -32,6 +32,10 @@
 
 #include <gst/gst.h>
 #include "mpegtspacketizer.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+
 
 G_BEGIN_DECLS
 
@@ -158,6 +162,8 @@ struct _MpegTSBase {
   /* Whether to push data and/or sections to subclasses */
   gboolean push_data;
   gboolean push_section;
+
+  int sock;
 };
 
 struct _MpegTSBaseClass {

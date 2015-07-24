@@ -88,6 +88,9 @@ static GQuark QUARK_OPCR;
 static GQuark QUARK_PTS;
 static GQuark QUARK_DTS;
 static GQuark QUARK_OFFSET;
+static GQuark QUARK_STREAM_TIME;
+
+static gboolean surfacedPTSoffset = FALSE;
 
 typedef enum
 {
@@ -266,6 +269,14 @@ enum
 
 /* Pad functions */
 
+extern GstClockTime
+mpegts_packetizer_first_pcr_ts (MpegTSPacketizer2 * packetizer,
+    guint16 pcr_pid);
+
+extern GstClockTime
+mpegts_packetizer_pts_ts_skew_offset (MpegTSPacketizer2 * packetizer,
+    guint16 pcr_pid);
+
 
 /* mpegtsbase methods */
 static void
@@ -306,6 +317,7 @@ _extra_init (void)
   QUARK_PTS = g_quark_from_string ("pts");
   QUARK_DTS = g_quark_from_string ("dts");
   QUARK_OFFSET = g_quark_from_string ("offset");
+  QUARK_STREAM_TIME = g_quark_from_string ("stream_time");
 }
 
 #define gst_ts_demux_parent_class parent_class
@@ -1560,6 +1572,15 @@ gst_ts_demux_record_pts (GstTSDemux * demux, TSDemuxStream * stream,
 {
   MpegTSBaseStream *bs = (MpegTSBaseStream *) stream;
 
+  /* NE added vars */
+  GstClockTime pcr_pts_offset_ts;
+  GstStructure *StartPCRMessageStruct;
+  GQuark QUARK_STARTPCR = g_quark_from_string ("startPCR");
+  GQuark QUARK_STARTPCRPID = g_quark_from_string ("startPCRPid");
+  GQuark QUARK_STARTPCRVAL = g_quark_from_string ("startPCRVal");
+  gboolean messagePosted = FALSE;
+  /*  NE end of vars */
+
   stream->raw_pts = pts;
   if (pts == -1) {
     stream->pts = GST_CLOCK_TIME_NONE;
@@ -1576,16 +1597,54 @@ gst_ts_demux_record_pts (GstTSDemux * demux, TSDemuxStream * stream,
 
   GST_LOG ("pid 0x%04x Stored PTS %" G_GUINT64_FORMAT, bs->pid, stream->pts);
 
-  if (G_UNLIKELY (demux->emit_statistics)) {
+  //if (G_UNLIKELY (demux->emit_statistics)) {
     GstStructure *st;
     st = gst_structure_new_id_empty (QUARK_TSDEMUX);
     gst_structure_id_set (st,
         QUARK_PID, G_TYPE_UINT, bs->pid,
         QUARK_OFFSET, G_TYPE_UINT64, offset, QUARK_PTS, G_TYPE_UINT64, pts,
+        QUARK_STREAM_TIME, G_TYPE_UINT64, stream->pts,
         NULL);
     gst_element_post_message (GST_ELEMENT_CAST (demux),
         gst_message_new_element (GST_OBJECT (demux), st));
+ // }
+
+
+  /* NE retrieve first_pcr_ts for synchronising application */
+
+  if (!surfacedPTSoffset) {
+    if (MPEG_TS_BASE_PACKETIZER (demux)->calculate_skew)
+      pcr_pts_offset_ts =
+          mpegts_packetizer_pts_ts_skew_offset (MPEG_TS_BASE_PACKETIZER (demux),
+          demux->program->pcr_pid);
+    else
+      pcr_pts_offset_ts =
+          mpegts_packetizer_first_pcr_ts (MPEG_TS_BASE_PACKETIZER (demux),
+          demux->program->pcr_pid);
+
+    /* form message and post to element bus */
+    StartPCRMessageStruct = gst_structure_new_id_empty (QUARK_STARTPCR);
+
+    //g_print("demux: demux->program->pcr_pid %d \n", demux->program->pcr_pid);
+    //g_print("demux: first_pcr_ts %"G_GUINT64_FORMAT " \n", pcr_pts_offset_ts);
+    //g_print("demux: sizeof first_pcr_ts %d \n", sizeof(pcr_pts_offset_ts));
+
+    gst_structure_id_set (StartPCRMessageStruct,
+        QUARK_STARTPCRPID, G_TYPE_INT, demux->program->pcr_pid,
+        QUARK_STARTPCRVAL, G_TYPE_UINT64, pcr_pts_offset_ts, NULL);
+
+    messagePosted = gst_element_post_message (GST_ELEMENT_CAST (demux),
+        gst_message_new_element (GST_OBJECT (demux), StartPCRMessageStruct));
+
+    if (!messagePosted)
+      g_print ("***** could not post pcrstart message to bus *****\n");
+    //g_print ("Calling send PCR Start Message to bus in tsdemux.c \n");
+
+    surfacedPTSoffset = FALSE;  //first calls are not correct
+
   }
+
+
 }
 
 static inline void
@@ -1850,7 +1909,8 @@ gst_ts_demux_queue_data (GstTSDemux * demux, TSDemuxStream * stream,
   } else {
     GST_WARNING ("CONTINUITY: Mismatch packet %d, stream %d",
         cc, stream->continuity_counter);
-    stream->state = PENDING_PACKET_DISCONT;
+    if (stream->state != PENDING_PACKET_EMPTY)
+              stream->state = PENDING_PACKET_DISCONT;
   }
   stream->continuity_counter = cc;
 

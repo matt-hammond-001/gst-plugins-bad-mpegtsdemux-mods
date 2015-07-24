@@ -34,6 +34,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <glib.h>
 
@@ -55,6 +59,7 @@ static GQuark QUARK_PID;
 static GQuark QUARK_PCR_PID;
 static GQuark QUARK_STREAMS;
 static GQuark QUARK_STREAM_TYPE;
+static long int socketwriteCount = 0;
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
@@ -210,6 +215,30 @@ mpegts_base_reset (MpegTSBase * base)
     klass->reset (base);
 }
 
+static gboolean
+_open_socket (int *sock)
+{
+  struct sockaddr_in client_adr;
+
+  if ((*sock = socket (AF_INET, SOCK_DGRAM, 0)) == -1) {
+    g_print ("Failed to create socket.\n");
+    return FALSE;
+  }
+
+  /* Bind socket to address. */
+  memset (&client_adr, 0, sizeof (struct sockaddr_in));
+  client_adr.sin_family = AF_INET;
+  client_adr.sin_addr.s_addr = htonl (INADDR_ANY);
+  client_adr.sin_port = htons (0);
+
+  if (bind (*sock, (const struct sockaddr *) &client_adr,
+          sizeof (struct sockaddr_in)) == -1) {
+    g_print ("Failed to bind socket.\n");
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static void
 mpegts_base_init (MpegTSBase * base)
 {
@@ -235,6 +264,8 @@ mpegts_base_init (MpegTSBase * base)
   base->push_data = TRUE;
   base->push_section = TRUE;
 
+  _open_socket (&base->sock);
+
   mpegts_base_reset (base);
 }
 
@@ -248,6 +279,7 @@ mpegts_base_dispose (GObject * object)
     base->disposed = TRUE;
     g_free (base->known_psi);
     g_free (base->is_pes);
+    close (base->sock);
   }
 
   if (G_OBJECT_CLASS (parent_class)->dispose)
@@ -1118,6 +1150,43 @@ query_upstream_latency (MpegTSBase * base)
   base->queried_latency = TRUE;
 }
 
+static gboolean
+_write_to_socket (MpegTSBase * base, GstBuffer * buf)
+{
+  GstMapInfo info;
+  struct sockaddr_in server_adr;
+  ssize_t bytes_written = 0;
+
+  g_return_val_if_fail (buf != NULL, FALSE);
+
+  if (!gst_buffer_map (buf, &info, GST_MAP_READ)) {
+    g_print ("Failed to map buffer.\n");
+    return FALSE;
+  }
+
+  /*g_print ("There are %u bytes of data to send.\n", info.size); */
+
+  /* Set address of server to which we'll send data. */
+  memset (&server_adr, 0, sizeof (struct sockaddr_in));
+  server_adr.sin_family = AF_INET;
+  inet_aton ("127.0.0.1", &server_adr.sin_addr);
+  server_adr.sin_port = htons (5555);
+
+  /* Send message to server. */
+  bytes_written = sendto (base->sock, info.data, info.size, 0,
+      (const struct sockaddr *) &server_adr, sizeof (struct sockaddr_in));
+
+  gst_buffer_unmap (buf, &info);
+
+  if (bytes_written < 0) {
+    g_print ("Error sending datagram.\n");
+    return FALSE;
+  } else {
+    //g_print ("Written %u bytes of data to send. socketwriteCount: %d\n", bytes_written, socketwriteCount++); 
+    return TRUE;
+  }
+}
+
 static GstFlowReturn
 mpegts_base_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
 {
@@ -1130,6 +1199,8 @@ mpegts_base_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
 
   base = GST_MPEGTS_BASE (parent);
   klass = GST_MPEGTS_BASE_GET_CLASS (base);
+
+  _write_to_socket (base, buf);
 
   packetizer = base->packetizer;
 
